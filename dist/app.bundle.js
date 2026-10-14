@@ -186,6 +186,187 @@ function concentrationColor(value,min,max){
 
 return {riverKey,riverColor,riverGroups,riverMatches,preidentifiedRiver,stationLinks,dateWindow,closestMeasurements,concentrationColor};
 })();
+modules["profile.mjs"]=(()=>{
+const {quantified}=modules["core.mjs"];
+const {closestMeasurements}=modules["river.mjs"];
+
+const RAD=Math.PI/180,EARTH=6371008.8,DAY=86400000;
+function distanceMetres(a,b){
+ const lat=(b[1]-a[1])*RAD,lon=(b[0]-a[0])*RAD;
+ const h=Math.sin(lat/2)**2+Math.cos(a[1]*RAD)*Math.cos(b[1]*RAD)*Math.sin(lon/2)**2;
+ return 2*EARTH*Math.asin(Math.sqrt(Math.min(1,h)));
+}
+// Course geometries can contain reversed pieces, branches and disconnected parts.
+// Use the longest continuous path in the largest tree component. Never bridge gaps
+// or substitute schematic station links for river kilometres.
+function riverPath(collection){
+ const lines=[];
+ for(const feature of collection?.features||[]){const g=feature.geometry;if(g?.type==='LineString')lines.push(g.coordinates);else if(g?.type==='MultiLineString')lines.push(...g.coordinates);}
+ if(!lines.length||lines.length>1000)throw Error('Tracé absent ou trop complexe pour établir un profil.');
+ const nodes=[],edges=[];
+ const endpoint=point=>{let id=nodes.findIndex(n=>distanceMetres(n.point,point)<=5);if(id<0){id=nodes.length;nodes.push({point,edges:[]});}return id;};
+ for(const [id,coords] of lines.entries()){
+  if(coords.length<2||!coords.every(p=>p.length>=2&&p.every(Number.isFinite)&&Math.abs(p[0])<=180&&Math.abs(p[1])<=90))throw Error('Coordonnées du tracé invalides.');
+  const length=coords.slice(1).reduce((total,p,i)=>total+distanceMetres(coords[i],p),0);if(!length)continue;
+  const a=endpoint(coords[0]),b=endpoint(coords.at(-1)),edge={id,a,b,coords,length};edges.push(edge);nodes[a].edges.push(edge);nodes[b].edges.push(edge);
+ }
+ const visited=new Set(),components=[];
+ for(let root=0;root<nodes.length;root++){
+  if(visited.has(root))continue;const stack=[root],ids=[],componentEdges=new Set();
+  while(stack.length){const id=stack.pop();if(visited.has(id))continue;visited.add(id);ids.push(id);for(const edge of nodes[id].edges){componentEdges.add(edge);stack.push(edge.a===id?edge.b:edge.a);}}
+  components.push({ids,edges:[...componentEdges],length:[...componentEdges].reduce((sum,e)=>sum+e.length,0)});
+ }
+ const component=components.sort((a,b)=>b.length-a.length)[0];
+ if(!component||component.edges.length!==component.ids.length-1)throw Error('Le tracé contient une boucle : l’itinéraire kilométrique est ambigu.');
+ const walk=start=>{const stack=[{id:start,parent:-1,distance:0}],parents=new Map();let farthest={id:start,distance:0};
+  while(stack.length){const item=stack.pop();if(item.distance>farthest.distance)farthest=item;for(const edge of nodes[item.id].edges){const next=edge.a===item.id?edge.b:edge.a;if(next===item.parent)continue;parents.set(next,{id:item.id,edge});stack.push({id:next,parent:item.id,distance:item.distance+edge.length});}}
+  return {farthest,parents};
+ };
+ const first=walk(component.ids[0]).farthest.id,route=walk(first);let current=route.farthest.id;const pieces=[];
+ while(current!==first){const {id,edge}=route.parents.get(current);pieces.push({edge,coords:edge.a===id?edge.coords:edge.coords.slice().reverse()});current=id;}
+ pieces.reverse();const segments=[];let length=0;
+ for(const {edge,coords} of pieces){
+  // A join of at most 5 m reflects coordinate precision, and is counted explicitly.
+  if(segments.length)length+=distanceMetres(segments.at(-1).b,coords[0]);
+  for(let i=1;i<coords.length;i++){const size=distanceMetres(coords[i-1],coords[i]);if(size)segments.push({a:coords[i-1],b:coords[i],start:length,length:size,line:edge.id});length+=size;}
+ }
+ if(!segments.length)throw Error('Tracé sans longueur exploitable.');
+ return {segments,length,lines,usedLines:new Set(pieces.map(p=>p.edge.id)),omittedLines:lines.length-pieces.length};
+}
+function project(point,a,b){
+ const scale=Math.cos(point[1]*RAD),ax=(a[0]-point[0])*RAD*EARTH*scale,ay=(a[1]-point[1])*RAD*EARTH;
+ const dx=(b[0]-a[0])*RAD*EARTH*scale,dy=(b[1]-a[1])*RAD*EARTH;
+ const t=Math.max(0,Math.min(1,-(ax*dx+ay*dy)/(dx*dx+dy*dy||1)));
+ return {t,distance:Math.hypot(ax+t*dx,ay+t*dy)};
+}
+function positionStations(path,stations,maxOffset=1000){
+ const positions=[],excluded=[];
+ for(const station of stations){
+  const point=[station.longitude,station.latitude];if(!point.every(Number.isFinite)){excluded.push({station,reason:'Coordonnées absentes'});continue;}
+  let nearest=null;
+  for(const segment of path.segments){const projection=project(point,segment.a,segment.b);if(!nearest||projection.distance<nearest.offset)nearest={station,metres:segment.start+segment.length*projection.t,offset:projection.distance};}
+  if(nearest.offset>maxOffset){excluded.push({station,reason:'À plus de 1 km du tracé retenu'});continue;}
+  let otherDistance=Infinity;
+  for(const [id,coords] of path.lines.entries())if(!path.usedLines.has(id))for(let i=1;i<coords.length;i++)otherDistance=Math.min(otherDistance,project(point,coords[i-1],coords[i]).distance);
+  if(otherDistance+5<nearest.offset){excluded.push({station,reason:'Sur une branche ou un tronçon hors du profil'});continue;}
+  positions.push(nearest);
+ }
+ positions.sort((a,b)=>a.metres-b.metres);
+ return {positions,excluded};
+}
+function profileValues(rows,positions,{mode='date',day,tolerance=30,reverse=false}={}){
+ const byStation=new Map(),nearest=mode==='date'?closestMeasurements(rows,day):null;
+ if(mode==='mean')for(const row of rows){if(String(row.code_qualification)!=='1'||!Number.isFinite(row.resultat))continue;const item=byStation.get(row.code_station)||{sum:0,count:0,excluded:0,first:null,last:null};if(quantified(row)){item.sum+=row.resultat;item.count++;item.first=!item.first||row.date_prelevement<item.first?row.date_prelevement:item.first;item.last=!item.last||row.date_prelevement>item.last?row.date_prelevement:item.last;}else item.excluded++;byStation.set(row.code_station,item);}
+ const ordered=reverse?positions.slice().reverse():positions,origin=ordered[0]?.metres||0;
+ return ordered.map(position=>{
+  const code=position.station.code_station,sample=nearest?.get(code),mean=byStation.get(code);
+  const accepted=sample&&sample.distance<=Number(tolerance)*DAY;
+  return {...position,x:Math.abs(position.metres-origin)/1000,y:mode==='mean'?(mean?.count?mean.sum/mean.count:null):(accepted&&quantified(sample.row)?sample.row.resultat:null),sample:accepted?sample.row:null,count:mode==='mean'?mean?.count||0:accepted&&quantified(sample.row)?1:0,excluded:mode==='mean'?mean?.excluded||0:accepted&&!quantified(sample.row)?1:0,first:mean?.first,last:mean?.last};
+ });
+}
+function latestProfileDay(rows,positions,tolerance=30){
+ const dates=[...new Set(rows.map(r=>r.date_prelevement))].sort().reverse();
+ for(const day of dates)if(profileValues(rows,positions,{day,tolerance}).filter(p=>p.y!==null).length>=3)return day;
+ return dates[0]||null;
+}
+
+return {distanceMetres,riverPath,positionStations,profileValues,latestProfileDay};
+})();
+modules["profile-view.mjs"]=(()=>{
+const {groupAnalyses,deduplicate,resultLabel,thresholdKind,validDateRange,csvCell,csvText}=modules["core.mjs"];
+const {riverPath,positionStations,profileValues,latestProfileDay}=modules["profile.mjs"];
+
+function installRiverProfile({parameters,context,loadRows,loadGeometry,stationName}){
+ const $=id=>document.getElementById(id),panel=$('profile-panel'),cache=new Map();
+ const format=new Intl.NumberFormat('fr-FR',{maximumFractionDigits:3}),dateFormat=new Intl.DateTimeFormat('fr-FR',{dateStyle:'medium',timeZone:'UTC'});
+ const date=v=>dateFormat.format(new Date(v)),element=(tag,text)=>{const el=document.createElement(tag);el.textContent=text;return el;};
+ let signature='',generation=0,controller,loaded,chart,points=[],reverse=false,frame;
+ for(const parameter of parameters){const option=element('option',parameter.label);option.value=parameter.code;$('profile-parameter').append(option);}
+ function destroy(){chart?.destroy();chart=null;$('profile-chart-wrap').hidden=true;$('profile-table-details').hidden=true;$('profile-export').disabled=true;}
+ function update(){
+  const target=context(),key=JSON.stringify([target?.key,target?.stations.map(s=>s.code_station).sort(),target?.start,target?.end]);
+  if(key===signature)return;signature=key;controller?.abort();generation++;loaded=null;reverse=false;destroy();
+  const count=target?.stations.length||0,ready=count>=3;
+  $('profile-summary').textContent=target?`${target.name} · ${count} stations sélectionnées`:'Sélectionnez des stations sur un même cours d’eau.';
+  $('profile-load').disabled=!ready;$('profile-controls').hidden=!ready;$('profile-readout').hidden=true;$('profile-date-controls').hidden=true;$('profile-group-label').hidden=true;
+  $('profile-status').textContent=ready?'Ouvrez ce panneau pour charger le profil sur la période des analyses.':`Le profil nécessite au moins 3 stations du même cours d’eau${target?` (${count} sélectionnée${count>1?'s':''})`:''}. Utilisez « Sélectionner ce cours d’eau » sur la carte.`;
+  if(panel.open&&ready)load();
+ }
+ async function load(){
+  const target=context();if(!target||target.stations.length<3)return;
+  controller?.abort();controller=new AbortController();const signal=controller.signal,token=++generation,param=$('profile-parameter').value;
+  destroy();loaded=null;$('profile-readout').hidden=true;$('profile-date-controls').hidden=true;$('profile-group-label').hidden=true;$('profile-load').disabled=true;
+  $('profile-status').textContent=`Chargement du tracé et des analyses de ${target.name}…`;
+  try{
+   const key=JSON.stringify([target.key,target.stations.map(s=>s.code_station).sort(),param,target.start,target.end]);
+   const [geometry,rows]=await Promise.all([loadGeometry(target.key),cache.has(key)?cache.get(key):loadRows(target.stations.map(s=>s.code_station),param,target.start,target.end,signal)]);
+   if(token!==generation||signal.aborted)return;
+   const located=positionStations(riverPath(geometry),target.stations);
+   if(located.positions.length<3)throw Error(`Seulement ${located.positions.length} stations peuvent être placées sur un tracé continu. Il en faut au moins 3.`);
+   if(!cache.has(key)){cache.set(key,rows);if(cache.size>8)cache.delete(cache.keys().next().value);}
+   const groups=groupAnalyses(deduplicate(rows).filter(r=>String(r.code_parametre)===param&&r.date_prelevement>=target.start&&r.date_prelevement<=target.end)).sort((a,b)=>b.rows.length-a.rows.length);
+   loaded={target,param,located,groups};const select=$('profile-group');select.replaceChildren();
+   for(const [index,group] of groups.entries()){const option=element('option',`${group.unit||'Sans unité'} · ${group.fraction}`);option.value=index;select.append(option);}
+   $('profile-group-label').hidden=groups.length<2;
+   const last=latestProfileDay(groups[0]?.rows||[],located.positions,Number($('profile-tolerance').value))||target.end;
+   const current=$('profile-date').value;$('profile-date').min=target.start;$('profile-date').max=target.end;$('profile-date').value=current>=target.start&&current<=target.end?current:last;
+   $('profile-slider').min=Date.parse(target.start)/86400000;$('profile-slider').max=Date.parse(target.end)/86400000;$('profile-slider').value=Date.parse($('profile-date').value)/86400000;
+   $('profile-range-start').textContent=date(target.start);$('profile-range-end').textContent=date(target.end);$('profile-readout').hidden=false;render();
+  }catch(error){if(token!==generation||signal.aborted)return;controller.abort();$('profile-status').textContent=`Profil indisponible : ${error.message} Vous pouvez réessayer.`;}
+  finally{if(token===generation)$('profile-load').disabled=false;}
+ }
+ function render(){
+  if(!loaded)return;const {target,param,located,groups}=loaded,group=groups[Number($('profile-group').value)||0],mode=$('profile-mode').value,inputDay=$('profile-date').value,tolerance=Number($('profile-tolerance').value);
+  const validDay=validDateRange(inputDay,inputDay)&&inputDay>=target.start&&inputDay<=target.end;
+  if(mode==='date'&&!validDay){destroy();$('profile-date-controls').hidden=false;$('profile-status').textContent='Choisissez une date dans la période des analyses.';return;}
+  const day=validDay?inputDay:target.end;
+  $('profile-date-controls').hidden=mode!=='date';$('profile-date-caption').textContent=date(day);
+  $('profile-slider').setAttribute('aria-valuetext',date(day));
+  points=profileValues(group?.rows||[],located.positions,{mode,day,tolerance,reverse});
+  const usable=points.filter(p=>p.y!==null).length,omitted=located.excluded.length,thresholds=points.reduce((sum,p)=>sum+p.excluded,0),origin=points[0]?.station;
+  $('profile-title').textContent=`${parameters.find(p=>p.code===param)?.label} · ${target.name}`;
+  $('profile-unit').textContent=group?`${group.unit||'Sans unité'} · ${group.fraction}`:'Aucune analyse';
+  $('profile-origin').textContent=`0 km : ${origin?stationName(origin):'—'} · Distance approximative sur le tracé Sandre. Le sens de l’axe n’est pas un sens d’écoulement certifié.`;
+  $('profile-reverse').textContent='Inverser l’axe';$('profile-reverse').setAttribute('aria-pressed',String(reverse));
+  const period=mode==='mean'?`Moyennes du ${date(target.start)} au ${date(target.end)}`:`${date(day)}${tolerance?` ± ${tolerance} jours`:' · date exacte'}`;
+  $('profile-status').textContent=`${period} · ${usable}/${points.length} stations avec une valeur quantifiée${omitted?` · ${omitted} hors du tracé retenu`:''}${thresholds?` · ${thresholds} résultat${thresholds>1?'s':''} de seuil ou non quantifié${thresholds>1?'s':''} exclu${thresholds>1?'s':''}`:''}.${usable<3?' Il faut au moins 3 stations avec une valeur pour tracer la courbe.':''}`;
+  $('profile-method').textContent=mode==='mean'?'Moyenne arithmétique des résultats quantifiés de chaque station sur la période. Ni pondération par le temps, ni remplacement des seuils par une valeur. Les dates et les fréquences de prélèvement peuvent différer entre stations.':'Prélèvement réel le plus proche de la date choisie, dans l’écart accepté. Aucune interpolation dans le temps. Les dates réelles figurent dans les infobulles et le tableau. Les lignes relient des stations ; elles ne représentent pas une mesure continue.';
+  $('profile-chart-wrap').dataset.usableStations=usable;$('profile-chart-wrap').dataset.mode=mode;$('profile-chart-wrap').dataset.day=day;
+  $('profile-chart-wrap').dataset.points=JSON.stringify(points.map(p=>({code:p.station.code_station,km:Number(p.x.toFixed(3)),value:p.y,date:p.sample?.date_prelevement,count:p.count})));
+  if(usable>=3){
+   $('profile-chart-wrap').hidden=false;
+   const datasets=[{label:'Valeurs quantifiées',data:points.map(p=>({...p,y:p.y})),borderColor:'#207a83',backgroundColor:'#207a83',pointRadius:5,pointHoverRadius:7,borderWidth:2,spanGaps:false,tension:0}];
+   if(mode==='date')datasets.push({label:'Seuils analytiques',data:points.filter(p=>p.sample&&p.y===null&&['below','above'].includes(thresholdKind(p.sample))).map(p=>({...p,y:p.sample.resultat})),showLine:false,pointStyle:'triangle',pointRotation:context=>thresholdKind(context.raw?.sample||{})==='below'?180:0,pointRadius:6,backgroundColor:'#fff',borderColor:'#667d78',pointBorderWidth:2});
+   const label=point=>point.y===null?'Sans valeur quantifiée':mode==='mean'?`Moyenne : ${format.format(point.y)} ${group?.unit||''}`:`${resultLabel(point.sample)} ${group?.unit||''}`;
+   const options={responsive:true,maintainAspectRatio:false,animation:false,parsing:false,interaction:{mode:'nearest',intersect:false},plugins:{legend:{display:false},tooltip:{callbacks:{title:items=>items.length?stationName(items[0].raw.station):'',label:item=>`${format.format(item.raw.x)} km · ${label(item.raw)}`,afterLabel:item=>mode==='mean'?`${item.raw.count} mesures · ${date(item.raw.first)} — ${date(item.raw.last)}`:`Prélèvement : ${date(item.raw.sample.date_prelevement)}`}}},scales:{x:{type:'linear',min:0,title:{display:true,text:'Distance depuis la première station (km)'},grid:{display:false},ticks:{maxTicksLimit:7}},y:{title:{display:true,text:group?.unit||'Valeur'},grid:{color:'#eef2ed'}}}};
+   if(chart){chart.data.datasets=datasets;chart.options=options;chart.update('none');}else chart=new Chart($('profile-chart'),{type:'line',data:{datasets},options});
+   $('profile-chart').setAttribute('aria-label',`${$('profile-title').textContent}. ${usable} stations avec une valeur. Axe : distance en kilomètres. Valeurs dans le tableau.`);
+  }else{chart?.destroy();chart=null;$('profile-chart-wrap').hidden=true;}
+  const tbody=$('profile-table');tbody.replaceChildren();
+  for(const point of points){const tr=document.createElement('tr'),when=mode==='mean'?(point.count?`${date(point.first)} — ${date(point.last)}`:'—'):(point.sample?date(point.sample.date_prelevement):'—');
+   const value=point.y!==null?format.format(point.y)+(group?.unit?` ${group.unit}`:''):point.sample?`${resultLabel(point.sample)} ${group?.unit||''} (${thresholdKind(point.sample)==='unknown'?'non quantifié':'seuil'})`:'Aucune valeur';
+   for(const text of [stationName(point.station),format.format(point.x),value,when,mode==='mean'?`${point.count}${point.excluded?` · ${point.excluded} exclues`:''}`:point.count?'1':'0'])tr.append(element('td',text));tbody.append(tr);
+  }
+  for(const item of located.excluded){const tr=document.createElement('tr');for(const text of [stationName(item.station),'—',item.reason,'—','0'])tr.append(element('td',text));tbody.append(tr);}
+  $('profile-table-details').hidden=false;$('profile-export').disabled=!usable;
+ }
+ function exportProfile(){
+  if(!loaded||!points.length)return;const group=loaded.groups[Number($('profile-group').value)||0],mode=$('profile-mode').value;
+  const headers=['Station','Identifiant station','Distance km','Valeur quantifiée','Unité','Fraction','Mode','Date cible','Date de prélèvement / début','Fin','Nombre de mesures','Résultats exclus'];
+  const rows=points.map(p=>[csvText(stationName(p.station)),csvCell(p.station.code_station),csvCell(p.x),csvCell(p.y),csvText(group?.unit),csvText(group?.fraction),csvCell(mode),csvCell(mode==='date'?$('profile-date').value:''),csvCell(mode==='mean'?p.first:p.sample?.date_prelevement),csvCell(p.last),csvCell(p.count),csvCell(p.excluded)].join(';'));
+  const url=URL.createObjectURL(new Blob(['\ufeff'+headers.map(csvCell).join(';')+'\r\n'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=`profil_${loaded.target.key}_${loaded.param}.csv`;link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
+ }
+ panel.addEventListener('toggle',()=>{if(panel.open&&!loaded)load();else if(panel.open)chart?.resize();});
+ $('profile-load').addEventListener('click',load);$('profile-parameter').addEventListener('change',load);
+ for(const id of ['profile-mode','profile-tolerance','profile-group'])$(id).addEventListener('change',render);
+ $('profile-date').addEventListener('change',()=>{if(!loaded)return;if($('profile-date').checkValidity()&&$('profile-date').value)$('profile-slider').value=Date.parse($('profile-date').value)/86400000;render();});
+ $('profile-slider').addEventListener('input',()=>{$('profile-date').value=new Date(Number($('profile-slider').value)*86400000).toISOString().slice(0,10);cancelAnimationFrame(frame);frame=requestAnimationFrame(render);});
+ $('profile-reverse').addEventListener('click',()=>{reverse=!reverse;render();});$('profile-export').addEventListener('click',exportProfile);
+ return {update};
+}
+
+return {installRiverProfile};
+})();
 modules["station-layer.mjs"]=(()=>{
 const {addGridPoint,nearestGridPoint}=modules["catalogue.mjs"];
 
@@ -328,6 +509,7 @@ const {unpackCatalogue,mercatorPoint}=modules["catalogue.mjs"];
 const {createStationLayer,installRectangleSelection}=modules["station-layer.mjs"];
 const {riverKey,riverColor,riverGroups,riverMatches,preidentifiedRiver,stationLinks,dateWindow,closestMeasurements,concentrationColor}=modules["river.mjs"];
 const {installMapBackground}=modules["map-background.mjs"];
+const {installRiverProfile}=modules["profile-view.mjs"];
 
 const $=id=>document.getElementById(id);
 const API='https://hubeau.eaufrance.fr/api/v2/qualite_rivieres/';
@@ -340,6 +522,7 @@ const dateShort=v=>shortDateFormatter.format(new Date(v));
 const state={stations:[],stationByCode:new Map(),filtered:[],selected:[],selectedSet:new Set(),parameters:new Set(PRESETS.essentials),rows:[],charts:[],examples:null,cache:new Map(),colorMap:new Map(),multi:false,availability:null,analysisGeneration:0,availabilityGeneration:0,coverage:null,rivers:new Map(),activeRiver:null,riverCandidate:null,boxMode:false,historyPage:0,snapshot:null,snapshotGeneration:0,links:new Map()};
 const HISTORY_PAGE_SIZE=12;
 const geometryCache=new Map(),geometryQueue=[];let geometryActive=0;
+const geometryWaiters=new Map();let riverProfile;
 const places={metro:{center:[46.6,2.4],zoom:6},antilles:{center:[15.3,-61],zoom:7},guyane:{center:[4,-53.1],zoom:7},reunion:{center:[-21.12,55.53],zoom:10},mayotte:{center:[-12.8,45.15],zoom:10}};
 let map,stationLayer,linkLayer,analysisController,availabilityController,snapshotController,searchTimer,queryTimer,availabilityTimer,toastTimer;
 
@@ -382,6 +565,7 @@ function initControls(){
   $('select-river').addEventListener('click',()=>{const group=state.rivers.get(state.riverCandidate||state.activeRiver);if(!group)return;state.activeRiver=group.key;state.riverCandidate=group.key;$('river-search').value=prettyName(group.name);$('river-results').hidden=true;$('search').value='';$('basin').value='';$('territory').value='';state.selected=group.stations.filter(s=>hasChosenMeasurements(s)&&(!state.availability||state.availability.has(s.code_station))).map(s=>s.code_station);state.historyPage=0;clearSnapshot();updateSelection();applyFilters(true);queueAnalyses();showToast(`${number(state.selected.length)} stations sélectionnées sur ${prettyName(group.name)}.`);});
   $('river-lines').addEventListener('change',renderRiverLinks);
   for(const p of PARAMETERS){const option=node('option','',p.label);option.value=p.code;$('map-parameter').append(option);}
+  riverProfile=installRiverProfile({parameters:PARAMETERS,stationName,context:()=>{const group=state.rivers.get(state.riverCandidate||state.activeRiver);if(!group)return null;return {key:group.key,name:prettyName(group.name),stations:state.selected.map(code=>state.stationByCode.get(code)).filter(s=>s&&riverKey(s)===group.key),start:$('date-start').value,end:$('date-end').value};},loadGeometry:ensureRiverGeometry,loadRows:loadProfileRows});
   $('map-date').value=today;$('load-date-view').addEventListener('click',refreshSnapshot);$('clear-date-view').addEventListener('click',()=>clearSnapshot());$('snapshot-fraction').addEventListener('change',()=>applySnapshotGroup());
   $('history-prev').addEventListener('click',()=>{if(state.historyPage>0){state.historyPage--;updateSelection();queueAnalyses();}});
   $('history-next').addEventListener('click',()=>{if((state.historyPage+1)*HISTORY_PAGE_SIZE<state.selected.length){state.historyPage++;updateSelection();queueAnalyses();}});
@@ -589,6 +773,7 @@ function updateRiverControls(){
  const group=state.rivers.get(state.riverCandidate||state.activeRiver),count=group?.stations.filter(s=>hasChosenMeasurements(s)&&(!state.availability||state.availability.has(s.code_station))).length||0;
  $('select-river').disabled=!group||!count;$('clear-river').hidden=!state.activeRiver;$('river-active').textContent=group?`${prettyName(group.name)} · ${number(count)} stations avec analyses`:'Cliquez sur une station pour identifier son cours d’eau';
  $('select-river').textContent='Sélectionner ce cours d’eau';$('select-river').title=group?`${number(count)} stations sur ${prettyName(group.name)}`:'';
+ riverProfile?.update();
 }
 function renderRiverLinks(){
  if(!linkLayer)return;linkLayer.clearLayers();$('river-geometry-note').textContent='';if(!$('river-lines').checked)return;
@@ -608,7 +793,20 @@ function renderRiverLinks(){
  $('river-geometry-note').textContent=real?`Trait plein : tracé Sandre, BD CARTHAGE 2017${schematic?' · pointillés : liaisons schématiques':''}.`:schematic?'Pointillés : liaisons schématiques entre stations, sans sens d’écoulement.':'';
 }
 function pumpGeometry(){
- while(geometryActive<2&&geometryQueue.length){const key=geometryQueue.shift();geometryActive++;loadRiverGeometry(key).then(geo=>geometryCache.set(key,geo)).catch(()=>geometryCache.set(key,false)).finally(()=>{geometryActive--;renderRiverLinks();pumpGeometry();});}
+ while(geometryActive<2&&geometryQueue.length){const key=geometryQueue.shift();geometryActive++;loadRiverGeometry(key).then(geo=>{geometryCache.set(key,geo);for(const waiter of geometryWaiters.get(key)||[])waiter.resolve(geo);geometryWaiters.delete(key);}).catch(error=>{geometryCache.set(key,false);for(const waiter of geometryWaiters.get(key)||[])waiter.reject(error);geometryWaiters.delete(key);}).finally(()=>{geometryActive--;renderRiverLinks();pumpGeometry();});}
+}
+function ensureRiverGeometry(key){
+ const cached=geometryCache.get(key);if(cached)return Promise.resolve(cached);
+ const pending=new Promise((resolve,reject)=>{if(!geometryWaiters.has(key))geometryWaiters.set(key,[]);geometryWaiters.get(key).push({resolve,reject});});
+ if(!geometryCache.has(key)||cached===false){geometryCache.set(key,null);geometryQueue.push(key);pumpGeometry();}return pending;
+}
+async function loadProfileRows(codes,param,start,end,signal){
+ if(!validDateRange(start,end))throw Error('La période des analyses est invalide.');
+ // Reuse a temporal cache only when it covers every requested station and date.
+ // Pagination of temporal charts must never restrict the longitudinal profile.
+ for(const [key,value] of state.cache){const parts=JSON.parse(key);if(Array.isArray(parts[0])&&codes.every(code=>parts[0].includes(code))&&parts[1].includes(param)&&start>=parts[2]&&end<=parts[3])return value.rows.filter(r=>codes.includes(r.code_station)&&String(r.code_parametre)===param&&r.date_prelevement>=start&&r.date_prelevement<=end);}
+ const local=[],remote=[];for(const code of codes){const example=state.examples;if(example&&example.stations.includes(code)&&example.parameters.includes(param)&&start>=example.start&&end<=example.end)local.push(...example.data.filter(r=>r.code_station===code&&String(r.code_parametre)===param&&r.date_prelevement>=start&&r.date_prelevement<=end));else remote.push(code);}
+ return deduplicate([...local,...(remote.length?await fetchAnalysisRange(remote,[param],start,end,signal):[])]);
 }
 async function loadRiverGeometry(key){
  if(!/^[\w-]+$/.test(key))throw Error('Identifiant hydrographique invalide');

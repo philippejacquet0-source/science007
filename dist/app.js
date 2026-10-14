@@ -3,6 +3,7 @@ import {unpackCatalogue,mercatorPoint} from './catalogue.mjs';
 import {createStationLayer,installRectangleSelection} from './station-layer.mjs';
 import {riverKey,riverColor,riverGroups,riverMatches,preidentifiedRiver,stationLinks,dateWindow,closestMeasurements,concentrationColor} from './river.mjs';
 import {installMapBackground} from './map-background.mjs';
+import {installRiverProfile} from './profile-view.mjs';
 
 const $=id=>document.getElementById(id);
 const API='https://hubeau.eaufrance.fr/api/v2/qualite_rivieres/';
@@ -15,6 +16,7 @@ const dateShort=v=>shortDateFormatter.format(new Date(v));
 const state={stations:[],stationByCode:new Map(),filtered:[],selected:[],selectedSet:new Set(),parameters:new Set(PRESETS.essentials),rows:[],charts:[],examples:null,cache:new Map(),colorMap:new Map(),multi:false,availability:null,analysisGeneration:0,availabilityGeneration:0,coverage:null,rivers:new Map(),activeRiver:null,riverCandidate:null,boxMode:false,historyPage:0,snapshot:null,snapshotGeneration:0,links:new Map()};
 const HISTORY_PAGE_SIZE=12;
 const geometryCache=new Map(),geometryQueue=[];let geometryActive=0;
+const geometryWaiters=new Map();let riverProfile;
 const places={metro:{center:[46.6,2.4],zoom:6},antilles:{center:[15.3,-61],zoom:7},guyane:{center:[4,-53.1],zoom:7},reunion:{center:[-21.12,55.53],zoom:10},mayotte:{center:[-12.8,45.15],zoom:10}};
 let map,stationLayer,linkLayer,analysisController,availabilityController,snapshotController,searchTimer,queryTimer,availabilityTimer,toastTimer;
 
@@ -57,6 +59,7 @@ function initControls(){
   $('select-river').addEventListener('click',()=>{const group=state.rivers.get(state.riverCandidate||state.activeRiver);if(!group)return;state.activeRiver=group.key;state.riverCandidate=group.key;$('river-search').value=prettyName(group.name);$('river-results').hidden=true;$('search').value='';$('basin').value='';$('territory').value='';state.selected=group.stations.filter(s=>hasChosenMeasurements(s)&&(!state.availability||state.availability.has(s.code_station))).map(s=>s.code_station);state.historyPage=0;clearSnapshot();updateSelection();applyFilters(true);queueAnalyses();showToast(`${number(state.selected.length)} stations sélectionnées sur ${prettyName(group.name)}.`);});
   $('river-lines').addEventListener('change',renderRiverLinks);
   for(const p of PARAMETERS){const option=node('option','',p.label);option.value=p.code;$('map-parameter').append(option);}
+  riverProfile=installRiverProfile({parameters:PARAMETERS,stationName,context:()=>{const group=state.rivers.get(state.riverCandidate||state.activeRiver);if(!group)return null;return {key:group.key,name:prettyName(group.name),stations:state.selected.map(code=>state.stationByCode.get(code)).filter(s=>s&&riverKey(s)===group.key),start:$('date-start').value,end:$('date-end').value};},loadGeometry:ensureRiverGeometry,loadRows:loadProfileRows});
   $('map-date').value=today;$('load-date-view').addEventListener('click',refreshSnapshot);$('clear-date-view').addEventListener('click',()=>clearSnapshot());$('snapshot-fraction').addEventListener('change',()=>applySnapshotGroup());
   $('history-prev').addEventListener('click',()=>{if(state.historyPage>0){state.historyPage--;updateSelection();queueAnalyses();}});
   $('history-next').addEventListener('click',()=>{if((state.historyPage+1)*HISTORY_PAGE_SIZE<state.selected.length){state.historyPage++;updateSelection();queueAnalyses();}});
@@ -264,6 +267,7 @@ function updateRiverControls(){
  const group=state.rivers.get(state.riverCandidate||state.activeRiver),count=group?.stations.filter(s=>hasChosenMeasurements(s)&&(!state.availability||state.availability.has(s.code_station))).length||0;
  $('select-river').disabled=!group||!count;$('clear-river').hidden=!state.activeRiver;$('river-active').textContent=group?`${prettyName(group.name)} · ${number(count)} stations avec analyses`:'Cliquez sur une station pour identifier son cours d’eau';
  $('select-river').textContent='Sélectionner ce cours d’eau';$('select-river').title=group?`${number(count)} stations sur ${prettyName(group.name)}`:'';
+ riverProfile?.update();
 }
 function renderRiverLinks(){
  if(!linkLayer)return;linkLayer.clearLayers();$('river-geometry-note').textContent='';if(!$('river-lines').checked)return;
@@ -283,7 +287,20 @@ function renderRiverLinks(){
  $('river-geometry-note').textContent=real?`Trait plein : tracé Sandre, BD CARTHAGE 2017${schematic?' · pointillés : liaisons schématiques':''}.`:schematic?'Pointillés : liaisons schématiques entre stations, sans sens d’écoulement.':'';
 }
 function pumpGeometry(){
- while(geometryActive<2&&geometryQueue.length){const key=geometryQueue.shift();geometryActive++;loadRiverGeometry(key).then(geo=>geometryCache.set(key,geo)).catch(()=>geometryCache.set(key,false)).finally(()=>{geometryActive--;renderRiverLinks();pumpGeometry();});}
+ while(geometryActive<2&&geometryQueue.length){const key=geometryQueue.shift();geometryActive++;loadRiverGeometry(key).then(geo=>{geometryCache.set(key,geo);for(const waiter of geometryWaiters.get(key)||[])waiter.resolve(geo);geometryWaiters.delete(key);}).catch(error=>{geometryCache.set(key,false);for(const waiter of geometryWaiters.get(key)||[])waiter.reject(error);geometryWaiters.delete(key);}).finally(()=>{geometryActive--;renderRiverLinks();pumpGeometry();});}
+}
+function ensureRiverGeometry(key){
+ const cached=geometryCache.get(key);if(cached)return Promise.resolve(cached);
+ const pending=new Promise((resolve,reject)=>{if(!geometryWaiters.has(key))geometryWaiters.set(key,[]);geometryWaiters.get(key).push({resolve,reject});});
+ if(!geometryCache.has(key)||cached===false){geometryCache.set(key,null);geometryQueue.push(key);pumpGeometry();}return pending;
+}
+async function loadProfileRows(codes,param,start,end,signal){
+ if(!validDateRange(start,end))throw Error('La période des analyses est invalide.');
+ // Reuse a temporal cache only when it covers every requested station and date.
+ // Pagination of temporal charts must never restrict the longitudinal profile.
+ for(const [key,value] of state.cache){const parts=JSON.parse(key);if(Array.isArray(parts[0])&&codes.every(code=>parts[0].includes(code))&&parts[1].includes(param)&&start>=parts[2]&&end<=parts[3])return value.rows.filter(r=>codes.includes(r.code_station)&&String(r.code_parametre)===param&&r.date_prelevement>=start&&r.date_prelevement<=end);}
+ const local=[],remote=[];for(const code of codes){const example=state.examples;if(example&&example.stations.includes(code)&&example.parameters.includes(param)&&start>=example.start&&end<=example.end)local.push(...example.data.filter(r=>r.code_station===code&&String(r.code_parametre)===param&&r.date_prelevement>=start&&r.date_prelevement<=end));else remote.push(code);}
+ return deduplicate([...local,...(remote.length?await fetchAnalysisRange(remote,[param],start,end,signal):[])]);
 }
 async function loadRiverGeometry(key){
  if(!/^[\w-]+$/.test(key))throw Error('Identifiant hydrographique invalide');
