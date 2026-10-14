@@ -1,0 +1,8 @@
+node_modules/
+qa/
+*.log
+.codex/
+.agents/
+.aws/
+.env
+.env.*

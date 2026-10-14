@@ -1,0 +1,152 @@
+[
+  {
+    "url": "https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/resultats_dis?code_commune=35238&code_parametre=1340&date_min_prelevement=2026-01-01&size=3",
+    "retrieved_at": "2026-10-13",
+    "http_status": 206,
+    "cors": [
+      "*"
+    ],
+    "count": 31,
+    "next": "https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/resultats_dis?code_commune=35238&code_parametre=1340&date_min_prelevement=2026-01-01&page=2&size=3",
+    "data": [
+      {
+        "code_departement": "35",
+        "nom_departement": "Ille-et-Vilaine",
+        "code_prelevement": "03500180256",
+        "code_parametre": "1340",
+        "code_parametre_se": "NO3",
+        "code_parametre_cas": "14797-55-8",
+        "libelle_parametre": "Nitrates (en NO3)",
+        "libelle_parametre_maj": "NITRATES (EN NO3)",
+        "libelle_parametre_web": null,
+        "code_type_parametre": "N",
+        "code_lieu_analyse": "L",
+        "resultat_alphanumerique": "24,8",
+        "resultat_numerique": 24.8,
+        "libelle_unite": "mg/L",
+        "code_unite": "162",
+        "limite_qualite_parametre": "<=50 mg/L",
+        "reference_qualite_parametre": null,
+        "code_commune": "35238",
+        "nom_commune": "RENNES",
+        "nom_uge": "CEBR SPL",
+        "nom_distributeur": "SPL EBR",
+        "nom_moa": "CEBR",
+        "date_prelevement": "2026-07-27T14:57:00Z",
+        "conclusion_conformite_prelevement": "Eau d'alimentation conforme aux exigences de qualité en vigueur pour l'ensemble des paramètres mesurés.  A noter cependant en ce point d'éc hantillonnage, la présence d'une flore revivifiable anormalement élevé e. L'exploitant a été informé de cette situation dès connaissance de c elle-ci par mon service.",
+        "conformite_limites_bact_prelevement": "C",
+        "conformite_limites_pc_prelevement": "C",
+        "conformite_references_bact_prelevement": "C",
+        "conformite_references_pc_prelevement": "C",
+        "reference_analyse": "03500186282",
+        "code_installation_amont": null,
+        "nom_installation_amont": null,
+        "reseaux": [
+          {
+            "code": "035004230",
+            "nom": "CEBR_VILLEJEAN/ROPHEMEL/MEZIERES/AVA_RENNES"
+          }
+        ]
+      },
+      {
+        "code_departement": "35",
+        "nom_departement": "Ille-et-Vilaine",
+        "code_prelevement": "03500180191",
+        "code_parametre": "1340",
+        "code_parametre_se": "NO3",
+        "code_parametre_cas": "14797-55-8",
+        "libelle_parametre": "Nitrates (en NO3)",
+        "libelle_parametre_maj": "NITRATES (EN NO3)",
+        "libelle_parametre_web": null,
+        "code_type_parametre": "N",
+        "code_lieu_analyse": "L",
+        "resultat_alphanumerique": "11,9",
+        "resultat_numerique": 11.9,
+        "libelle_unite": "mg/L",
+        "code_unite": "162",
+        "limite_qualite_parametre": "<=50 mg/L",
+        "reference_qualite_parametre": null,
+        "code_commune": "35238",
+        "nom_commune": "RENNES",
+        "nom_uge": "CEBR SPL",
+        "nom_distributeur": "SPL EBR",
+        "nom_moa": "CEBR",
+        "date_prelevement": "2026-07-22T09:08:00Z",
+        "conclusion_conformite_prelevement": "Eau d'alimentation conforme aux exigences de qualité en vigueur pour l'ensemble des paramètres mesurés.",
+        "conformite_limites_bact_prelevement": "C",
+        "conformite_limites_pc_prelevement": "C",
+        "conformite_references_bact_prelevement": "C",
+        "conformite_references_pc_prelevement": "C",
+        "reference_analyse": "03500186217",
+        "code_installation_amont": null,
+        "nom_installation_amont": null,
+        "reseaux": [
+          {
+            "code": "035004230",
+            "nom": "CEBR_VILLEJEAN/ROPHEMEL/MEZIERES/AVA_RENNES"
+          }
+        ]
+      },
+      {
+        "code_departement": "35",
+        "nom_departement": "Ille-et-Vilaine",
+        "code_prelevement": "03500180092",
+        "code_parametre": "1340",
+        "code_parametre_se": "NO3",
+        "code_parametre_cas": "14797-55-8",
+        "libelle_parametre": "Nitrates (en NO3)",
+        "libelle_parametre_maj": "NITRATES (EN NO3)",
+        "libelle_parametre_web": null,
+        "code_type_parametre": "N",
+        "code_lieu_analyse": "L",
+        "resultat_alphanumerique": "13,6",
+        "resultat_numerique": 13.6,
+        "libelle_unite": "mg/L",
+        "code_unite": "162",
+        "limite_qualite_parametre": "<=50 mg/L",
+        "reference_qualite_parametre": null,
+        "code_commune": "35238",
+        "nom_commune": "RENNES",
+        "nom_uge": "CEBR SPL",
+        "nom_distributeur": "SPL EBR",
+        "nom_moa": "CEBR",
+        "date_prelevement": "2026-07-15T12:36:00Z",
+        "conclusion_conformite_prelevement": "Eau d'alimentation conforme aux exigences de qualité en vigueur pour l'ensemble des paramètres mesurés.",
+        "conformite_limites_bact_prelevement": "C",
+        "conformite_limites_pc_prelevement": "C",
+        "conformite_references_bact_prelevement": "C",
+        "conformite_references_pc_prelevement": "C",
+        "reference_analyse": "03500186118",
+        "code_installation_amont": null,
+        "nom_installation_amont": null,
+        "reseaux": [
+          {
+            "code": "035004230",
+            "nom": "CEBR_VILLEJEAN/ROPHEMEL/MEZIERES/AVA_RENNES"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "url": "https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/communes_udi?code_commune=35238&annee=2026&size=20",
+    "retrieved_at": "2026-10-13",
+    "http_status": 200,
+    "cors": [
+      "*"
+    ],
+    "count": 1,
+    "next": null,
+    "data": [
+      {
+        "code_commune": "35238",
+        "nom_commune": "RENNES",
+        "nom_quartier": "-",
+        "code_reseau": "035004230",
+        "nom_reseau": "CEBR_VILLEJEAN/ROPHEMEL/MEZIERES/AVA_RENNES",
+        "debut_alim": "2023-01-01",
+        "annee": "2026"
+      }
+    ]
+  }
+]

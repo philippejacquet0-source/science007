@@ -1,0 +1,12 @@
+{
+  "name": "science007-au-fil-de-leau",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/prepare-data.mjs",
+    "start": "node server.mjs",
+    "sync-data": "node scripts/sync-data.mjs",
+    "prepare-data": "node scripts/prepare-data.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
